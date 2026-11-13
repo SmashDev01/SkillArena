@@ -1,7 +1,8 @@
-use near_sdk::{BorshStorageKey, 
+
+use near_sdk::{
     borsh::{self, BorshDeserialize, BorshSerialize},
     collections::LookupMap,
-    env, near_bindgen, AccountId, NearToken, PanicOnDefault, Promise,
+    env, near_bindgen, AccountId, BorshStorageKey, NearToken, PanicOnDefault, Promise,
 };
 use near_sdk::serde::{Deserialize, Serialize};
 
@@ -13,14 +14,27 @@ enum StorageKey {
     Tournaments,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Clone, schemars::JsonSchema)]
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Clone,
+    schemars::JsonSchema,
+)]
 #[borsh(crate = "near_sdk::borsh")]
 #[serde(crate = "near_sdk::serde")]
 pub struct Tournament {
     pub tournament_id: u64,
+
+    #[schemars(with = "Vec<String>")]
     pub players: Vec<AccountId>,
+
     pub prize_pool: u128,
+
+    #[schemars(with = "Option<String>")]
     pub winner: Option<AccountId>,
+
     pub finalized: bool,
     pub claimed: bool,
 }
@@ -168,20 +182,14 @@ impl SkillArena {
         Promise::new(winner).transfer(NearToken::from_yoctonear(amount))
     }
 
-    pub fn get_tournament(
-        &self,
-        tournament_id: u64,
-    ) -> Option<Tournament> {
+    pub fn get_tournament(&self, tournament_id: u64) -> Option<Tournament> {
         self.tournaments.get(&tournament_id)
     }
 
-    pub fn get_registered_players(
-        &self,
-        tournament_id: u64,
-    ) -> Vec<AccountId> {
+    pub fn get_registered_players(&self, tournament_id: u64) -> Vec<AccountId> {
         self.tournaments
             .get(&tournament_id)
-            .map(|t| t.players)
+            .map(|tournament| tournament.players)
             .unwrap_or_default()
     }
 
