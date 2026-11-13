@@ -2,7 +2,7 @@
 use near_sdk::{
     borsh::{self, BorshDeserialize, BorshSerialize},
     collections::LookupMap,
-    env, near_bindgen, AccountId, BorshStorageKey, NearToken, PanicOnDefault, Promise,
+    env, near, AccountId, BorshStorageKey, NearToken, PanicOnDefault, Promise,
 };
 use near_sdk::serde::{Deserialize, Serialize};
 
@@ -39,14 +39,14 @@ pub struct Tournament {
     pub claimed: bool,
 }
 
-#[near_bindgen]
+#[near(contract_state)]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
 pub struct SkillArena {
     owner_id: AccountId,
     tournaments: LookupMap<u64, Tournament>,
 }
 
-#[near_bindgen]
+#[near]
 impl SkillArena {
     #[init]
     pub fn new() -> Self {
