@@ -1,0 +1,43 @@
+name: Build NEAR Tournament Contract
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "contracts/skillarena-tournament/**"
+      - ".github/workflows/build-near-contract.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo-near
+        run: cargo install --locked cargo-near
+
+      - name: Build contract
+        working-directory: contracts/skillarena-tournament
+        run: cargo near build non-reproducible-wasm
+
+      - name: Collect WASM artifact
+        working-directory: contracts/skillarena-tournament
+        run: |
+          mkdir -p artifacts
+          WASM=$(find target -type f -name '*.wasm' | head -n 1)
+          test -n "$WASM"
+          cp "$WASM" artifacts/skillarena-tournament.wasm
+
+      - name: Upload contract
+        uses: actions/upload-artifact@v4
+        with:
+          name: skillarena-tournament-wasm
+          path: contracts/skillarena-tournament/artifacts/skillarena-tournament.wasm
