@@ -40,7 +40,7 @@ pub struct Tournament {
 }
 
 #[near(contract_state)]
-#[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
+#[derive(PanicOnDefault)]
 pub struct SkillArena {
     owner_id: AccountId,
     tournaments: LookupMap<u64, Tournament>,
