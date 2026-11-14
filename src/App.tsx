@@ -1,10 +1,22 @@
 
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
-import { supabase } from "./lib/supabase";
+
 import { NearConnector } from "@hot-labs/near-connect";
 
 type Game = "dashboard" | "reflex" | "memory" | "precision" | "clutch" | "leaderboard" | "profile";
+
+type ScoreGame = "reflex" | "memory" | "precision" | "clutch";
+
+const CONTRACT_ID = "smasj01.testnet";
+
+const CONTRACT_GAME_IDS: Record<ScoreGame, string> = {
+  reflex: "reflex-rush",
+  memory: "memory-matrix",
+  precision: "precision-strike",
+  clutch: "clutch-shot",
+};
+
 
 const styles = `
 * { box-sizing: border-box; }
@@ -95,6 +107,15 @@ export default function App() {
   const [bestMemory, setBestMemory] = useState(Number(localStorage.getItem("sa-memory") || 0));
   const [bestPrecision, setBestPrecision] = useState(Number(localStorage.getItem("sa-precision") || 0));
   const [bestClutch, setBestClutch] = useState(Number(localStorage.getItem("sa-clutch") || 0));
+  const [pendingScores, setPendingScores] = useState<Partial<Record<ScoreGame, number>>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("sa-pending-scores") || "{}");
+    } catch {
+      return {};
+    }
+  });
+  const [scoreSubmitMessage, setScoreSubmitMessage] = useState("");
+
 
   useEffect(() => {
     function handleClutchScore(event: MessageEvent) {
@@ -119,8 +140,10 @@ export default function App() {
     return () => window.removeEventListener("message", handleClutchScore);
   }, []);
   const [selectedLeaderboard, setSelectedLeaderboard] = useState<"all" | "reflex" | "memory" | "precision" | "clutch">("all");
-  const [onlineScores, setOnlineScores] = useState<Array<{id:number; player_name:string; game:string; score:number; created_at:string}>>([]);
-  const [onlineError, setOnlineError] = useState("");
+  const [globalScores, setGlobalScores] = useState<Array<{ account_id: string; score: number; game_id: string }>>([]);
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+  const [leaderboardError, setLeaderboardError] = useState("");
+
 
   useEffect(() => {
     const connector = new NearConnector({ network: "testnet" });
@@ -158,14 +181,146 @@ export default function App() {
     };
   }, []);
 
-  async function submitOnlineScore(game: "reflex" | "memory" | "precision" | "clutch", score: number) {
-    const { error } = await supabase.from("leaderboard").insert({
-      player_name: localStorage.getItem("sa-player-name") || "Player",
-      game,
-      score
+  function savePendingScore(game: ScoreGame, score: number) {
+    setPendingScores((current) => {
+      const previous = current[game];
+      const best = previous === undefined
+        ? score
+        : game === "reflex"
+          ? Math.min(previous, score)
+          : Math.max(previous, score);
+      const updated = { ...current, [game]: best };
+      localStorage.setItem("sa-pending-scores", JSON.stringify(updated));
+      return updated;
     });
-    if (error) console.error("Online score submission failed:", error.message);
   }
+
+  async function submitOnlineScore(game: ScoreGame, score: number) {
+    if (!Number.isSafeInteger(score) || score < 0) {
+      setScoreSubmitMessage("Invalid score. It was not submitted.");
+      return;
+    }
+
+    const connector = nearConnectorRef.current;
+
+    if (!connector || !nearAccount) {
+      savePendingScore(game, score);
+      setScoreSubmitMessage("Score saved. Connect your NEAR wallet to submit it on-chain.");
+      return;
+    }
+
+    try {
+      setScoreSubmitMessage("Waiting for wallet approval...");
+      const wallet = await connector.wallet();
+
+      await wallet.signAndSendTransaction({
+        network: "testnet",
+        signerId: nearAccount,
+        receiverId: CONTRACT_ID,
+        actions: [{
+          type: "FunctionCall",
+          params: {
+            methodName: "submit_score",
+            args: {
+              game_id: CONTRACT_GAME_IDS[game],
+              score,
+            },
+            gas: "30000000000000",
+            deposit: "0",
+          },
+        }],
+      });
+
+      setPendingScores((current) => {
+        const updated = { ...current };
+        delete updated[game];
+        localStorage.setItem("sa-pending-scores", JSON.stringify(updated));
+        return updated;
+      });
+
+      setScoreSubmitMessage("Score successfully submitted to the NEAR testnet contract.");
+    } catch (error) {
+      savePendingScore(game, score);
+      setScoreSubmitMessage(
+        error instanceof Error
+          ? "Submission failed: " + error.message + ". Your score has been saved for retry."
+          : "Submission failed. Your score has been saved for retry."
+      );
+      console.error("NEAR score submission failed:", error);
+    }
+
+    }
+  async function retryPendingScores() {
+    if (!nearAccount || !nearConnectorRef.current) {
+      setScoreSubmitMessage("Connect your NEAR wallet before retrying saved scores.");
+      return;
+    }
+
+    const entries = Object.entries(pendingScores) as [ScoreGame, number][];
+    for (const [game, score] of entries) {
+      await submitOnlineScore(game, score);
+    }
+  }
+
+  async function fetchContractLeaderboard(gameId: string): Promise<Array<{ account_id: string; score: number }>> {
+    const encodedArgs = btoa(unescape(encodeURIComponent(JSON.stringify({ game_id: gameId }))));
+    const response = await fetch("https://rpc.testnet.near.org", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "skillarena-leaderboard",
+        method: "query",
+        params: {
+          request_type: "call_function",
+          finality: "final",
+          account_id: CONTRACT_ID,
+          method_name: "get_leaderboard",
+          args_base64: encodedArgs,
+        },
+      }),
+    });
+
+    if (!response.ok) throw new Error("NEAR RPC returned HTTP " + response.status);
+    const payload = await response.json();
+    if (payload.error) throw new Error(payload.error.message || "NEAR RPC request failed");
+
+    const bytes = new Uint8Array(payload.result.result);
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
+
+  useEffect(() => {
+    if (page !== "leaderboard") return;
+
+    let cancelled = false;
+    const games: ScoreGame[] = selectedLeaderboard === "all"
+      ? ["reflex", "memory", "precision", "clutch"]
+      : [selectedLeaderboard];
+
+    setLeaderboardLoading(true);
+    setLeaderboardError("");
+
+    Promise.all(games.map(async (game) => {
+      const entries = await fetchContractLeaderboard(CONTRACT_GAME_IDS[game]);
+      return entries.map((entry) => ({
+        ...entry,
+        game_id: CONTRACT_GAME_IDS[game],
+      }));
+    }))
+      .then((results) => {
+        if (!cancelled) setGlobalScores(results.flat());
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setLeaderboardError(error instanceof Error ? error.message : "Could not load NEAR rankings.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLeaderboardLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [page, selectedLeaderboard]);
 
   async function connectNearWallet() {
     const connector = nearConnectorRef.current;
@@ -215,42 +370,7 @@ export default function App() {
     setProfileMessage("Profile saved on this device.");
   }
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadOnlineScores() {
-      let result;
-
-      if (selectedLeaderboard === "all") {
-        result = await supabase.from("leaderboard")
-          .select("id, player_name, game, score, created_at")
-          .order("created_at", { ascending: false }).limit(50);
-      } else if (selectedLeaderboard === "reflex") {
-        result = await supabase.from("leaderboard")
-          .select("id, player_name, game, score, created_at")
-          .eq("game", "reflex")
-          .order("score", { ascending: true }).limit(50);
-      } else {
-        result = await supabase.from("leaderboard")
-          .select("id, player_name, game, score, created_at")
-          .eq("game", selectedLeaderboard)
-          .order("score", { ascending: false }).limit(50);
-      }
-
-      if (cancelled) return;
-
-      if (result.error) {
-        setOnlineError(result.error.message);
-        setOnlineScores([]);
-      } else {
-        setOnlineError("");
-        setOnlineScores(result.data || []);
-      }
-    }
-
-    void loadOnlineScores();
-    return () => { cancelled = true; };
-  }, [selectedLeaderboard]);
+  
 
   // Reflex Rush
   const [reflexState, setReflexState] = useState<"ready" | "waiting" | "go" | "result">("ready");
@@ -367,6 +487,13 @@ export default function App() {
     return () => clearInterval(timer);
   }, [precisionStatus]);
 
+  useEffect(() => {
+    if (precisionStatus !== "finished" || precisionScore <= bestPrecision) return;
+    setBestPrecision(precisionScore);
+    localStorage.setItem("sa-precision", String(precisionScore));
+    void submitOnlineScore("precision", precisionScore);
+  }, [precisionStatus, precisionScore, bestPrecision]);
+
   function startPrecision() {
     setPrecisionScore(0);
     setHits(0);
@@ -393,11 +520,6 @@ export default function App() {
     setStreak(nextStreak);
     setHits(hits + 1);
     setPrecisionScore(nextScore);
-    if (nextScore > bestPrecision) {
-      setBestPrecision(nextScore);
-      localStorage.setItem("sa-precision", String(nextScore));
-      void submitOnlineScore("precision", nextScore);
-    }
     moveTarget();
   }
 
@@ -604,33 +726,79 @@ export default function App() {
               <div className="panel" style={{ marginTop: 18 }}>
                 <div className="section-head">
                   <h2>Global Player Rankings</h2>
-                  <span className="muted" style={{ fontSize: 12 }}>SUPABASE · TOP 50</span>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    ON-CHAIN · NEAR TESTNET
+                  </span>
                 </div>
 
-                {onlineError && <p className="leaderboard-note">Could not load rankings: {onlineError}</p>}
+                {leaderboardLoading ? (
+                  <p className="leaderboard-note">Loading on-chain rankings...</p>
+                ) : leaderboardError ? (
+                  <p className="leaderboard-note">
+                    Could not load rankings: {leaderboardError}
+                  </p>
+                ) : (
+                  (selectedLeaderboard === "all"
+                    ? ["reflex", "memory", "precision", "clutch"] as ScoreGame[]
+                    : [selectedLeaderboard]
+                  ).map((game) => {
+                    const entries = globalScores
+                      .filter((entry) => entry.game_id === CONTRACT_GAME_IDS[game])
+                      .sort((a, b) => game === "reflex"
+                        ? a.score - b.score
+                        : b.score - a.score
+                      );
 
-                {!onlineError && onlineScores.length === 0 && (
-                  <p className="leaderboard-note">No online scores yet. Set a new personal best to appear here.</p>
+                    const gameName = game === "reflex" ? "Reflex Rush"
+                      : game === "memory" ? "Memory Matrix"
+                      : game === "precision" ? "Precision Strike"
+                      : "Clutch Shot";
+
+                    return (
+                      <div key={game} style={{ marginTop: 18 }}>
+                        <h3>{gameName}</h3>
+                        {entries.length === 0 ? (
+                          <p className="leaderboard-note">No on-chain scores yet.</p>
+                        ) : entries.map((entry, index) => (
+                          <div className="leaderboard-row" key={entry.account_id}>
+                            <div>
+                              <strong>#{index + 1} · {entry.account_id}</strong>
+                              <small>NEAR account address</small>
+                            </div>
+                            <strong className="leaderboard-value">
+                              {game === "reflex" ? `${entry.score} ms`
+                                : game === "memory" ? `Round ${entry.score}`
+                                : entry.score}
+                            </strong>
+                            <span className="leaderboard-status">Ranked</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })
                 )}
 
-                {onlineScores.map((entry, index) => (
-                  <div className="leaderboard-row" key={entry.id}>
-                    <div>
-                      <strong>#{index + 1} · {entry.player_name}</strong>
-                      <small>
-                        {entry.game === "reflex" ? "Reflex Rush" : entry.game === "memory" ? "Memory Matrix" : entry.game === "precision" ? "Precision Strike" : "Clutch Shot"}
-                      </small>
-                    </div>
-                    <strong className="leaderboard-value">
-                      {entry.game === "reflex" ? entry.score + " ms" : entry.score}
-                    </strong>
-                    <span className="leaderboard-status">ONLINE</span>
+                {scoreSubmitMessage && (
+                  <p className="leaderboard-note">{scoreSubmitMessage}</p>
+                )}
+
+                {Object.keys(pendingScores).length > 0 && (
+                  <div className="leaderboard-note">
+                    <p>You have scores waiting to be submitted.</p>
+                    {nearAccount ? (
+                      <button className="primary" onClick={() => void retryPendingScores()}>
+                        Retry pending scores
+                      </button>
+                    ) : (
+                      <p>Connect your NEAR wallet before retrying them.</p>
+                    )}
                   </div>
-                ))}
+                )}
               </div>
 
               <div className="leaderboard-note">
-                Personal records remain saved on this device. Online rankings are shared through Supabase. Reflex Rush ranks lower times first; the other games rank higher scores first. Public score submissions are currently a prototype and are not cheat-proof.
+                Personal bests are saved locally. Global rankings will
+                use NEAR-powered score verification and competitive records.
               </div>
             </section>
           )}
