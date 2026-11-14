@@ -37,7 +37,7 @@ pub struct Tournament {
     pub claimed: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 #[serde(crate = "near_sdk::serde")]
 pub struct LeaderboardEntry {
     pub account_id: String,
